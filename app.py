@@ -117,12 +117,18 @@ def get_accused(parties_raw) -> str:
 
 @st.cache_data
 def load_data():
-    df = pd.read_csv("cases_clean.csv.gz", dtype={
-        "УИД": str, "Номер дела": str, "Суд": str, "Регион": str,
-        "Тип": str, "Инстанция": str, "Судья": str, "Решение": str,
-        "Статьи": str, "Стороны": str, "source_file": str,
-        "base_case_id": str, "clean_articles": str
-    })
+    use_cols = {
+        "УИД", "Номер дела", "Суд", "Регион", "Тип", "Инстанция",
+        "Судья", "Решение", "Статьи", "Стороны", "source_file",
+        "base_case_id", "clean_articles", "Дата поступления",
+        "Дата решения", "days_to_decision"
+    }
+    df = pd.read_csv(
+        "cases_clean.csv.gz",
+        usecols=lambda c: c in use_cols,
+        dtype=str
+    )
+    
     df["Дата поступления"] = pd.to_datetime(df["Дата поступления"], errors="coerce")
     df["Дата решения"] = pd.to_datetime(df["Дата решения"], errors="coerce")
     df["days_to_decision"] = pd.to_numeric(df.get("days_to_decision"), errors="coerce")
