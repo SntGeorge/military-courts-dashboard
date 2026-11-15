@@ -367,26 +367,21 @@ with tab2:
     if not clean_first.empty:
         cand_counts = clean_first.groupby("Обвиняемый")["dedup_key"].nunique()
         cand_names = cand_counts[cand_counts > 1].index
+        real_repeat_people = set(cand_names)
         rep_df = clean_first[clean_first["Обвиняемый"].isin(cand_names)].sort_values(["Обвиняемый", "Дата поступления"])
+
         for person, grp in rep_df.groupby("Обвиняемый"):
             if len(grp) < 2:
                 continue
             arts_seq = grp["clean_articles"].replace("", "Не указана").tolist()
             dates_seq = grp["Дата поступления"].tolist()
             for i in range(len(grp) - 1):
+                transitions.append(f"{arts_seq[i]} → {arts_seq[i+1]}")
                 if pd.notna(dates_seq[i]) and pd.notna(dates_seq[i + 1]):
                     diff = (dates_seq[i + 1] - dates_seq[i]).days
-                    if 30 <= diff <= 1825:
-                        real_repeat_people.add(person)
-                        transitions.append(f"{arts_seq[i]} → {arts_seq[i+1]}")
+                    if 0 <= diff <= 1825:
                         gaps_days.append(diff)
-    repeat_count = len(real_repeat_people)
-    repeat_pct = (repeat_count / unique_people * 100) if unique_people else 0
-    pm1, pm2, pm3, pm4 = st.columns(4)
-    pm1.metric("Уникальных подсудимых", fmt_int(unique_people))
-    pm2.metric("Реальных рецидивов (2+ дела)", f"{fmt_int(repeat_count)} ({repeat_pct:.1f}%)")
-    pm3.metric("Индекс анонимности (скрыто ФИО)", f"{hidden_pct:.1f}%")
-    pm4.metric("Чистых дел 1-й инст. с ФИО", fmt_int(len(clean_first)))
+
 
     if transitions:
         vc_tr = pd.Series(transitions).value_counts()
