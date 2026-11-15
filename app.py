@@ -118,13 +118,13 @@ def get_case_stage(num) -> str:
     s = str(num).strip()
     if s.startswith("1-"):
         return "1-я инстанция (по существу)"
-    if s.startswith("22К-") or s.startswith("22к-"):
+    if s.startswith(("22К-", "22к-")):
         return "Апелляция (мера пресечения)"
-    if s.startswith("22-") or s.startswith("10-"):
+    if s.startswith(("22-", "10-")):
         return "Апелляция (по существу)"
-    if s.startswith("7У-") or s.startswith("7у-"):
+    if s.startswith(("7У-", "7у-")):
         return "Кассация"
-    if s.startswith("4/") or s.startswith("3/"):
+    if s.startswith(("4/", "3/")):
         return "Материалы (арест, УДО, исполнение)"
     return "Прочее"
 
@@ -136,12 +136,13 @@ def load_data():
         "Судья", "Решение", "Статьи", "Стороны", "source_file",
         "base_case_id", "clean_articles", "Дата поступления",
         "Дата решения", "days_to_decision", "Ссылка на карточку",
-        "Карточка на сайте суда"
+        "Карточка на сайте суда", "Обвиняемый", "Тип_производства",
+        "dedup_key", "vc_num",
     }
     df = pd.read_csv(
         "cases_clean.csv.gz",
         usecols=lambda c: c in use_cols,
-        dtype=str
+        dtype=str,
     )
 
     df["Дата поступления"] = pd.to_datetime(df["Дата поступления"], errors="coerce")
@@ -157,14 +158,39 @@ def load_data():
         "CASSATION": "Кассация",
     }).fillna(df["Инстанция"])
 
-    df["Обвиняемый"] = df["Стороны"].map(get_accused)
-    df["Тип_производства"] = df["Номер дела"].map(get_case_stage)
+    if "Обвиняемый" not in df.columns:
+        df["Обвиняемый"] = df["Стороны"].map(get_accused)
+    if "Тип_производства" not in df.columns:
+        df["Тип_производства"] = df["Номер дела"].map(get_case_stage)
+    if "dedup_key" not in df.columns:
+        df["dedup_key"] = (
+            df["Номер дела"].fillna("").astype(str) + "|" +
+            df["Суд"].fillna("").astype(str) + "|" +
+            df["Обвиняемый"].fillna("").astype(str)
+        )
+    if "vc_num" not in df.columns:
+        df["vc_num"] = (
+            df["Стороны"]
+            .str.extract(r"(?:в/ч|войсковая часть)\s*№?\s*(\d{4,6})", flags=re.IGNORECASE)[0]
+            .fillna("")
+            .astype(str)
+        )
+    if "base_case_id" not in df.columns:
+        df["base_case_id"] = df["УИД"].apply(
+            lambda x: str(x).split("~")[0] if pd.notna(x) and "~" in str(x) else str(x)
+        )
 
-    df["dedup_key"] = (
-        df["Номер дела"].fillna("") + "|" +
-        df["Суд"].fillna("") + "|" +
-        df["Обвиняемый"].fillna("")
-    )
+    for str_col in ["Обвиняемый", "dedup_key", "vc_num", "clean_articles",
+                    "Номер дела", "УИД", "base_case_id"]:
+        if str_col in df.columns:
+            df[str_col] = df[str_col].fillna("").astype(str)
+
+    cat_cols = ["Суд", "Регион", "Инстанция", "Инстанция_рус", "Судья",
+                "decision_class", "Тип_производства"]
+    for col in cat_cols:
+        if col in df.columns:
+            df[col] = df[col].astype("category")
+
     return df
 
 
@@ -246,11 +272,11 @@ if selected_classes:
 if search_query:
     q = search_query.strip()
     mask = (
-        filtered_df["Стороны"].str.contains(q, case=False, na=False, regex=False) |
-        filtered_df["Суд"].str.contains(q, case=False, na=False, regex=False) |
-        filtered_df["Судья"].str.contains(q, case=False, na=False, regex=False) |
-        filtered_df["Номер дела"].str.contains(q, case=False, na=False, regex=False) |
-        filtered_df["УИД"].str.contains(q, case=False, na=False, regex=False)
+        filtered_df["Стороны"].fillna("").astype(str).str.contains(q, case=False, na=False, regex=False) |
+        filtered_df["Суд"].fillna("").astype(str).str.contains(q, case=False, na=False, regex=False) |
+        filtered_df["Судья"].fillna("").astype(str).str.contains(q, case=False, na=False, regex=False) |
+        filtered_df["Номер дела"].fillna("").astype(str).str.contains(q, case=False, na=False, regex=False) |
+        filtered_df["УИД"].fillna("").astype(str).str.contains(q, case=False, na=False, regex=False)
     )
     filtered_df = filtered_df[mask]
 
@@ -264,7 +290,8 @@ substantive_first = filtered_df[
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Всего карточек (актов)", fmt_int(len(filtered_df)))
 c2.metric("Дел 1-й инст. по существу", fmt_int(substantive_first["dedup_key"].nunique()))
-c3.metric("Уникальных базовых УИД", fmt_int(filtered_df["base_case_id"].nunique()))
+base_uid_cnt = filtered_df["base_case_id"].nunique() if "base_case_id" in filtered_df.columns else 0
+c3.metric("Уникальных базовых УИД", fmt_int(base_uid_cnt))
 
 valid_days = filter_valid_days(filtered_df["days_to_decision"])
 median_val = int(valid_days.median()) if len(valid_days) else 0
@@ -288,7 +315,10 @@ with tab1:
     ts_df = filtered_df.dropna(subset=["Дата поступления"]).copy()
     if not ts_df.empty:
         ts_df["Месяц"] = ts_df["Дата поступления"].dt.to_period("M").astype(str)
-        monthly = ts_df.groupby(["Месяц", "Инстанция_рус"]).size().reset_index(name="Количество")
+        monthly = (
+            ts_df.groupby(["Месяц", "Инстанция_рус"], observed=True)
+            .size().reset_index(name="Количество")
+        )
         fig_time = px.bar(
             monthly, x="Месяц", y="Количество", color="Инстанция_рус",
             barmode="stack", template="plotly_white",
@@ -344,31 +374,39 @@ with tab1:
 
 
 # ==================== ВКЛАДКА 2: ПОДСУДИМЫЕ ====================
-
 with tab2:
     st.subheader("👤 Аналитика по подсудимым: чистый подсчет без дублей инстанций")
     st.caption(
-        "Методика: для исключения задвоения от апелляций, кассаций, продлений стражи и передач по подсудности, "
-        "повторными считаются только отдельные дела 1-й инстанции по существу (1-...) с интервалом более 30 дней."
+        "Методика: повторными считаются отдельные уголовные дела 1-й инстанции по существу (1-...) "
+        "без апелляций, материалов об аресте и передач по подсудности."
     )
+
     acc_all = filtered_df[filtered_df["Обвиняемый"] != ""].copy()
     clean_first = acc_all[
         (acc_all["Инстанция"] == "FIRST") &
         (acc_all["Тип_производства"] == "1-я инстанция (по существу)") &
         (acc_all["decision_class"] != "Передано по подсудности")
-    ].drop_duplicates(subset=["dedup_key"]).copy()
+    ].drop_duplicates(subset=["Обвиняемый", "Номер дела"]).copy()
+
     total_acts = len(filtered_df)
     unique_people = acc_all["Обвиняемый"].nunique()
     hidden_acts = (filtered_df["Обвиняемый"] == "").sum()
     hidden_pct = (hidden_acts / total_acts * 100) if total_acts else 0
+
     transitions = []
     gaps_days = []
     real_repeat_people = set()
+
     if not clean_first.empty:
-        cand_counts = clean_first.groupby("Обвиняемый")["dedup_key"].nunique()
+        cand_counts = (
+            clean_first.drop_duplicates(subset=["Обвиняемый", "Номер дела"])
+            .groupby("Обвиняемый")["Номер дела"].nunique()
+        )
         cand_names = cand_counts[cand_counts > 1].index
         real_repeat_people = set(cand_names)
-        rep_df = clean_first[clean_first["Обвиняемый"].isin(cand_names)].sort_values(["Обвиняемый", "Дата поступления"])
+        rep_df = clean_first[clean_first["Обвиняемый"].isin(cand_names)].sort_values(
+            ["Обвиняемый", "Дата поступления"]
+        )
 
         for person, grp in rep_df.groupby("Обвиняемый"):
             if len(grp) < 2:
@@ -376,12 +414,20 @@ with tab2:
             arts_seq = grp["clean_articles"].replace("", "Не указана").tolist()
             dates_seq = grp["Дата поступления"].tolist()
             for i in range(len(grp) - 1):
-                transitions.append(f"{arts_seq[i]} → {arts_seq[i+1]}")
                 if pd.notna(dates_seq[i]) and pd.notna(dates_seq[i + 1]):
+                    transitions.append(f"{arts_seq[i]} → {arts_seq[i+1]}")
                     diff = (dates_seq[i + 1] - dates_seq[i]).days
                     if 0 <= diff <= 1825:
                         gaps_days.append(diff)
 
+    repeat_count = len(real_repeat_people)
+    repeat_pct = (repeat_count / unique_people * 100) if unique_people else 0
+
+    pm1, pm2, pm3, pm4 = st.columns(4)
+    pm1.metric("Уникальных подсудимых", fmt_int(unique_people))
+    pm2.metric("Повторных (2+ дела)", f"{fmt_int(repeat_count)} ({repeat_pct:.1f}%)")
+    pm3.metric("Индекс анонимности (скрыто ФИО)", f"{hidden_pct:.1f}%")
+    pm4.metric("Чистых дел 1-й инст. с ФИО", fmt_int(len(clean_first)))
 
     if transitions:
         vc_tr = pd.Series(transitions).value_counts()
@@ -397,22 +443,23 @@ with tab2:
         insights = []
         if unique_people > 0:
             insights.append(
-                f"• Реальный уровень повторных судов: {repeat_pct:.1f}% от распознанных подсудимых "
-                f"({fmt_int(repeat_count)} чел.) совершили повторное преступление спустя 30+ дней после первого дела."
+                f"• **Уровень повторных судов:** **{repeat_pct:.1f}%** от распознанных подсудимых "
+                f"(**{fmt_int(repeat_count)}** чел.) имеют два и более отдельных уголовных дела по существу "
+                f"(без учёта апелляций и материалов)."
             )
         if transitions:
             insights.append(
-                f"• Главный сценарий рецидива: самый частый переход квалификаций — "
-                f"«{top_transition}» ({fmt_int(top_transition_cnt)} подтвержденных случаев)."
+                f"• **Главный сценарий повторных дел:** самый частый переход квалификаций — "
+                f"**«{top_transition}»** (**{fmt_int(top_transition_cnt)}** случаев с известными датами)."
             )
         if median_gap is not None:
             insights.append(
-                f"• Скорость возврата в суд: медианный интервал между первым и новым уголовным делом "
-                f"составляет {median_gap} дн. (~{median_gap / 30.4:.1f} мес.)."
+                f"• **Скорость возврата в суд:** медианный интервал (по делам с известными датами, ≤5 лет) "
+                f"составляет **{median_gap} дн.** (~{median_gap / 30.4:.1f} мес.)."
             )
         if total_acts > 0:
             insights.append(
-                f"• Сокрытие данных судами: в {hidden_pct:.1f}% актов ({fmt_int(hidden_acts)} из {fmt_int(total_acts)}) "
+                f"• **Сокрытие данных судами:** в **{hidden_pct:.1f}%** актов (**{fmt_int(hidden_acts)}** из {fmt_int(total_acts)}) "
                 f"ФИО подсудимого скрыто или отсутствует."
             )
         st.markdown("\n\n".join(insights))
@@ -470,7 +517,7 @@ with tab2:
     with pc2:
         st.markdown("#### Топ-10 регионов по числу уникальных подсудимых")
         top_reg_p = (
-            acc_all.groupby("Регион")["Обвиняемый"]
+            acc_all.groupby("Регион", observed=True)["Обвиняемый"]
             .nunique().nlargest(10).reset_index(name="Подсудимых")
         )
         fig_rp = px.bar(
@@ -482,7 +529,7 @@ with tab2:
 
     if transitions:
         st.markdown("---")
-        st.markdown("#### 🔄 Переходы квалификаций при реальном рецидиве")
+        st.markdown("#### 🔄 Переходы квалификаций при повторных делах")
         ec1, ec2 = st.columns([1.2, 1])
         with ec1:
             trans_df = pd.Series(transitions).value_counts().head(12).reset_index()
@@ -509,15 +556,14 @@ with tab2:
     with rf1:
         p_search = st.text_input("🔎 Поиск по фамилии подсудимого:", key="accused_registry_search")
     with rf2:
-        only_real_rep = st.checkbox("Только подтвержденные рецидивы (2+ дела > 30 дн.)")
+        only_real_rep = st.checkbox("Только с несколькими делами по существу (2+ дела)")
 
     if not acc_all.empty:
-        acc_all["substantive_key"] = acc_all["dedup_key"].where(
+        acc_all["substantive_key"] = acc_all["Номер дела"].where(
             (acc_all["Инстанция"] == "FIRST") &
             (acc_all["Тип_производства"] == "1-я инстанция (по существу)") &
             (acc_all["decision_class"] != "Передано по подсудности")
         )
-
         registry = (
             acc_all.sort_values("Дата поступления")
             .groupby("Обвиняемый")
@@ -527,24 +573,24 @@ with tab2:
                 Первое_дело=("Дата поступления", "min"),
                 Последнее_дело=("Дата поступления", "max"),
                 Статьи=("clean_articles", lambda x: "; ".join(sorted(set(a for a in x if a)))),
-                Регионы=("Регион", lambda x: ", ".join(sorted(set(r for r in x if r)))),
+                Регионы=("Регион", lambda x: ", ".join(sorted(set(str(r) for r in x if pd.notna(r))))),
             )
             .reset_index()
             .sort_values(["Дел_по_существу", "Последнее_дело"], ascending=[False, False])
         )
-
         registry["Первое_дело"] = registry["Первое_дело"].dt.strftime("%Y-%m-%d")
         registry["Последнее_дело"] = registry["Последнее_дело"].dt.strftime("%Y-%m-%d")
         if only_real_rep:
             registry = registry[registry["Обвиняемый"].isin(real_repeat_people)]
         if p_search:
-            registry = registry[registry["Обвиняемый"].str.contains(p_search.strip(), case=False, na=False)]
+            registry = registry[
+                registry["Обвиняемый"].str.contains(p_search.strip(), case=False, na=False, regex=False)
+            ]
         st.write(f"В реестре показано: {fmt_int(len(registry))} чел.")
         st.dataframe(registry.head(1000), use_container_width=True, hide_index=True)
 
 
 # ==================== ВКЛАДКА 3: АНАЛИТИКА ПО СУДАМ ====================
-
 with tab3:
     st.subheader("Детальный разбор конкретного суда")
     court_counts = filtered_df["Суд"].value_counts()
@@ -572,7 +618,7 @@ with tab3:
             st.markdown("#### Нагрузка и скорость по судьям")
             judges_stats = (
                 court_df.dropna(subset=["Судья"])
-                .groupby("Судья")
+                .groupby("Судья", observed=True)
                 .agg(
                     Актов=("УИД", "count"),
                     Приговоров=("Решение", lambda x: x.str.contains("ПРИГОВОР", case=False, na=False).sum()),
@@ -597,19 +643,18 @@ with tab3:
 
 
 # ==================== ВКЛАДКА 4: КАРТОЧКА ДЕЛА (ДОСЬЕ) ====================
-
 with tab4:
     st.subheader("Детальный просмотр дела и всех связанных карточек")
     st.caption("Связывает все инстанции по базовому УИД, а также находит все дела этого же обвиняемого в базе.")
     if filtered_df.empty:
         st.warning("По текущим фильтрам дел не найдено.")
     else:
-        preview_df = filtered_df.head(500).copy()
-        preview_df = preview_df.reset_index().rename(columns={"index": "_row_id"})
+        preview_df = filtered_df.head(500).reset_index(drop=True)
+        preview_df["_row_id"] = preview_df.index
         preview_df["_label"] = (
             preview_df["Номер дела"].fillna("Б/Н") + " | " +
             preview_df["Обвиняемый"].replace("", "ФИО скрыто") + " | " +
-            preview_df["Суд"] + " #" + preview_df["_row_id"].astype(str)
+            preview_df["Суд"].astype(str) + " #" + preview_df["_row_id"].astype(str)
         )
         selected_idx = st.selectbox(
             "Выберите судебный акт (показаны первые 500 из выборки):",
@@ -621,28 +666,38 @@ with tab4:
         accused_name = selected_row["Обвиняемый"]
 
         if accused_name:
-            related_cases = df[(df["base_case_id"] == base_id) | (df["Обвиняемый"] == accused_name)].sort_values("Дата поступления")
-        else:
+            cond = (df["Обвиняемый"] == accused_name)
+            if base_id:
+                cond = cond | (df["base_case_id"] == base_id)
+            related_cases = df[cond].sort_values("Дата поступления")
+        elif base_id:
             related_cases = df[df["base_case_id"] == base_id].sort_values("Дата поступления")
+        else:
+            related_cases = df[df["УИД"] == selected_row["УИД"]].sort_values("Дата поступления")
+
         st.info(f"Найдено связанных карточек (по УИД и обвиняемому): {len(related_cases)}")
+
         for _, row in related_cases.iterrows():
             with st.container(border=True):
                 h1, h2, h3 = st.columns([2, 2, 1])
                 h1.markdown(f"{row['Тип_производства']} ({row['Номер дела']})")
                 h2.markdown(f"Суд: {row['Суд']}")
                 h3.markdown(f"Регион: {row['Регион']}")
+
                 d1, d2, d3, d4 = st.columns(4)
                 d1.write("Поступило: " + (row["Дата поступления"].strftime("%Y-%m-%d") if pd.notna(row["Дата поступления"]) else "—"))
                 d2.write("Решение: " + (row["Дата решения"].strftime("%Y-%m-%d") if pd.notna(row["Дата решения"]) else "В процессе"))
                 days = row.get("days_to_decision")
                 d3.write(f"Срок: {int(days)} дн." if pd.notna(days) and days >= 0 else "Срок: —")
                 d4.write(f"Судья: {row['Судья'] if pd.notna(row['Судья']) else 'Не указан'}")
+
                 st.write(f"Итог: {row['Решение'] if pd.notna(row['Решение']) else 'Решение еще не вынесено'}")
                 raw_codes = split_articles(row["clean_articles"])
                 if raw_codes:
                     st.write("Статьи: " + " • ".join([format_article(c) for c in raw_codes]))
                 st.markdown(f"Обвиняемый: {row['Обвиняемый'] or 'Скрыт судом'}")
                 st.code(str(row["Стороны"]) if pd.notna(row["Стороны"]) else "Данные скрыты судом", language=None)
+
                 links = []
                 if pd.notna(row.get("Карточка на сайте суда")):
                     links.append(f"[Карточка на сайте суда]({row['Карточка на сайте суда']})")
@@ -650,11 +705,10 @@ with tab4:
                     links.append(f"[Decretum]({row['Ссылка на карточку']})")
                 if links:
                     st.markdown(" • ".join(links))
-                st.caption(f"УИД: {row['УИД']} | Источник: {row['source_file']}")
+                st.caption(f"УИД: {row['УИД']} | Источник: {row.get('source_file', '—')}")
 
 
 # ==================== ВКЛАДКА 5: OSINT / СВЯЗИ ====================
-
 with tab5:
     st.subheader("🕵️ OSINT-инструменты и связи")
     osint_mode = st.radio(
@@ -669,21 +723,14 @@ with tab5:
     st.markdown("---")
 
     if osint_mode == "🪖 Реестр воинских частей (в/ч)":
-        vc_series = filtered_df["Стороны"].dropna().str.findall(
-            r"(?:в/ч|войсковая часть)\s*№?\s*(\d{4,6})", flags=re.IGNORECASE
-        )
-        vc_exploded = vc_series.explode().dropna().str.strip()
-        if vc_exploded.empty:
+        vc_valid = filtered_df[filtered_df["vc_num"] != ""]
+        if vc_valid.empty:
             st.info("В текущей выборке не найдено упоминаний номеров в/ч.")
         else:
-            vc_counts = vc_exploded.value_counts().reset_index()
+            vc_counts = vc_valid["vc_num"].value_counts().reset_index()
             vc_counts.columns = ["Номер_вч", "Упоминаний"]
             selected_vc = st.selectbox("Выберите номер в/ч:", options=vc_counts["Номер_вч"].tolist())
-            vc_mask = filtered_df["Стороны"].str.contains(
-                rf"(?:в/ч|войсковая часть)\s*№?\s*{re.escape(selected_vc)}\b",
-                case=False, na=False, regex=True,
-            )
-            vc_cases = filtered_df[vc_mask]
+            vc_cases = vc_valid[vc_valid["vc_num"] == selected_vc]
             st.write(f"Найдено карточек по в/ч {selected_vc}: {len(vc_cases)}")
             st.dataframe(
                 vc_cases[["Дата поступления", "Регион", "Суд", "Обвиняемый", "clean_articles", "Решение", "УИД"]],
@@ -710,7 +757,9 @@ with tab5:
         )
         if custom_regex:
             try:
-                res_df = filtered_df[filtered_df["Стороны"].str.contains(custom_regex, case=False, na=False, regex=True)]
+                res_df = filtered_df[
+                    filtered_df["Стороны"].str.contains(custom_regex, case=False, na=False, regex=True)
+                ]
                 st.write(f"Найдено карточек: {len(res_df)}")
                 st.dataframe(
                     res_df[["Дата поступления", "Регион", "Суд", "Обвиняемый", "clean_articles", "Стороны", "Решение", "УИД"]].head(500),
@@ -721,7 +770,6 @@ with tab5:
 
 
 # ==================== ВКЛАДКА 6: ПОЛНАЯ ТАБЛИЦА ====================
-
 with tab6:
     st.subheader("Реестр судебных актов")
     cols_to_show = [
