@@ -517,15 +517,17 @@ with tab2:
         only_real_rep = st.checkbox("Только подтвержденные рецидивы (2+ дела > 30 дн.)")
 
     if not acc_all.empty:
-        def _count_substantive(idx):
-            sub = acc_all.loc[idx]
-            return sub[sub["Тип_производства"] == "1-я инстанция (по существу)"]["dedup_key"].nunique()
+        acc_all["substantive_key"] = acc_all["dedup_key"].where(
+            (acc_all["Инстанция"] == "FIRST") &
+            (acc_all["Тип_производства"] == "1-я инстанция (по существу)") &
+            (acc_all["decision_class"] != "Передано по подсудности")
+        )
 
         registry = (
             acc_all.sort_values("Дата поступления")
             .groupby("Обвиняемый")
             .agg(
-                Дел_по_существу=("dedup_key", _count_substantive),
+                Дел_по_существу=("substantive_key", "nunique"),
                 Всего_карточек=("УИД", "count"),
                 Первое_дело=("Дата поступления", "min"),
                 Последнее_дело=("Дата поступления", "max"),
@@ -535,6 +537,7 @@ with tab2:
             .reset_index()
             .sort_values(["Дел_по_существу", "Последнее_дело"], ascending=[False, False])
         )
+
         registry["Первое_дело"] = registry["Первое_дело"].dt.strftime("%Y-%m-%d")
         registry["Последнее_дело"] = registry["Последнее_дело"].dt.strftime("%Y-%m-%d")
         if only_real_rep:
